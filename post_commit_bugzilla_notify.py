@@ -49,10 +49,12 @@ import os
 import smtplib
 import re
 
-to_addr = "BUGZILLA_INCOMING@YOUR_BUGZILLA_SERVER.com"
-from_addr = "svncommit@YOUR_BUGZILLA_SERVER.com" 
-view_svn_url = "http://VIEW_SVN_URL_UP_TO_path=/PROJECT/PATH/"
-
+to_addr = "BUGZILLA@COMPANY.com"
+from_default_addr = "BUGZILLA@COMPANY.com" 
+#view_svn_url = "http://VIEW_SVN_URL_UP_TO_path=/PROJECT/PATH/"
+svnlook_path = "/usr/bin/svnlook"
+email_in_path = "/var/www/html/bugzilla/email_in.pl"
+authormap_path = "authormap"
 
 def add_status( ref ):
     if ref == "Fixed":
@@ -61,15 +63,6 @@ def add_status( ref ):
         return "@bug_status = REOPENED\n\n"
     else:
         return "\n"
-
-#function to differentiate between multiple bugzilla servers based on
-#bug id. I use this at my site. To enable, customize the logic, email addresses
-#and enable the call to this function from the commented call below.
-def resolve_server( bug_id ):
-    if int( bug_id ) > 50000:
-        return "BUGZILLA_INCOMING@server1.com"
-    else:
-        return "BUGZILLA_INCOMING@server2.com"
 
 def notify_bugzilla_from_svn( repo, rev ):
 
@@ -86,10 +79,25 @@ def notify_bugzilla_from_svn( repo, rev ):
                       'reopen':     'Reopens'}
 
     #get info about commit
-    svn_proc = subprocess.Popen("/usr/bin/svnlook info %s -r %s" % ( repo, rev ), shell=True, \
+    svn_proc = subprocess.Popen("%s info \"%s\" -r %s" % ( svnlook_path, repo, rev ), shell=True, \
                                     stdout = subprocess.PIPE, env = os.environ)
     svn_info = [line for line in svn_proc.stdout.readlines()]
+    author = svn_info[0].strip()
 
+    try: 
+        with open(authormap_path) as f:
+            for line in f:
+                (key, val) = line.split()
+                #print (author, key, val)
+                if author == key:
+                    author_addr = val
+                    break
+        
+        if author_addr != None:
+            from_addr = author_addr
+    except IOError:
+        from_addr = from_default_addr
+    
     #site-specific: format it for bugzilla display
     svn_info.insert(0 , "New Revision: %s     Author: " % rev)
     svn_info[3] = "\nLog:\n"
@@ -107,29 +115,28 @@ def notify_bugzilla_from_svn( repo, rev ):
     #find all references to bugzilla bugs
     cmd_groups = command_re.findall(svn_info)
 
-    s = smtplib.SMTP("localhost")
-
     for command, bugs in cmd_groups:
         bug_id = bug_re.findall(bugs)[0]
         action = supported_cmds.get(command.lower(),'')
-        #enable the following for multiple bugzilla instances
-        #to_addr = resolve_server(bug_id) 
+        msg = "From: %s\nTo: %s\nSubject: [Bug %s]\n\n" % ( from_addr, to_addr, bug_id )
         if action:
-            msg = "From: %s\nTo: %s\nSubject: [Bug %s]\n" % ( from_addr, to_addr, bug_id )
             msg += add_status( action )
-            msg += svn_info 
-            msg += "\nChanges:\n"
-            svn_proc = subprocess.Popen("/usr/bin/svnlook changed %s -r %s" % ( repo, rev ), shell=True, \
-                                    stdout = subprocess.PIPE, env = os.environ)
-            msg += ''.join(svn_proc.stdout.readlines())
-            msg += "Patch:\n"
-            msg+= "%s&rev=%s&oldrev=%s\n"\
-                % ( view_svn_url, rev, str ( int ( rev ) - 1 ) )
+        msg += svn_info 
+        msg += "\nChanges:\n"
+        svn_proc = subprocess.Popen("%s changed \"%s\" -r %s" % ( svnlook_path, repo, rev ), shell=True, \
+                                stdout = subprocess.PIPE, env = os.environ)
+        msg += ''.join(svn_proc.stdout.readlines())
+        #msg += "Patch:\n"
+        #msg+= "%s&rev=%s&oldrev=%s\n"\
+        #    % ( view_svn_url, rev, str ( int ( rev ) - 1 ) )
 
-            s.sendmail(from_addr, to_addr, msg)
+        #print msg
+        push_email_to_bugzilla(msg)
     
-    s.quit()
-
+def push_email_to_bugzilla( msg ):
+    email_in = subprocess.Popen("%s" % ( email_in_path ), stdout = subprocess.PIPE, stderr = subprocess.PIPE, stdin = subprocess.PIPE, env = os.environ)
+    output = email_in.communicate(input=msg)
+    #print msg
 
 def main():
     if len( sys.argv ) != 3:
